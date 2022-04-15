@@ -1,0 +1,244 @@
+classdef PreprocessingPpg
+    properties
+        filePath; frequency; loadedSamples; plotFlag; signal; time;preproc;orgsign;
+        Egim;
+        baseLineCorrectedSignal;
+        waveletBaseLineCorrectedSignal;
+        bandStopWaveletBaseLineCorrectedSignal;
+        lowPassBandStopWaveletBaseLineCorrectedSignal;
+        smoothedLowPassBandStopWaveletBaseLineCorrectedSignal;
+        peak;
+        left; right;    
+        PP;
+        PLocation;
+        PValue
+        Pfoot;
+        Pmin;
+        PPdistance;
+        PminLocation;
+        PfLocation;
+        Pdev;
+        PdLocation;
+        PPFragmentMean;
+        PPFragments;
+        feature;
+    end
+   
+    methods
+        %%
+        function [PPG] = PreprocessingPpg(filePath, frequency, loadedSamples,plotFlag)
+            PPG.filePath        = filePath;
+            PPG.frequency       = frequency;
+            PPG.loadedSamples = loadedSamples;
+            PPG.plotFlag        = plotFlag;
+           
+            [PPG] = loadSignal(PPG);
+            PPG.orgsign = PPG.signal;
+            [PPG] = Preprocessing(PPG);
+            [PPG] = SignalProcess(PPG);
+            [PPG] = Normalization(PPG);
+            [PPG] = detectPeaks(PPG);
+            [PPG]=plotFragments(PPG);
+            if(plotFlag == 1)
+                plotPeaks(PPG);
+            end            
+        end
+       
+        %%
+        function [PPG] = loadSignal(PPG)
+            load(PPG.filePath,'val');
+            PPG.signal = val(1,PPG.loadedSamples);
+            PPG.orgsign = val(1,PPG.loadedSamples);
+           figure (1);
+        plot(PPG.signal,'b','linewidth',2);
+        title('Ham PPG Sinyali','fontsize',14); xlabel('Örnek','fontsize',14); ylabel('Genlik','fontsize',14)
+           xlim([0 300])
+        end
+
+        %%
+        function [PPG]=Preprocessing(PPG)
+            % Base Line Correction
+            [C,L]=wavedec(PPG.signal,9,'db8');
+            cA=appcoef(C,L,'db8',9);
+            l=length(cA);
+            C(1:l)=0;
+            PPG.baseLineCorrectedSignal=waverec(C,L,'db8');
+            sorh = 's';    % Specified soft or hard thresholding
+            thrSettings = 4.294226749492056;
+            % wavelet filter
+            PPG.waveletBaseLineCorrectedSignal = cmddenoise(PPG.baseLineCorrectedSignal,'db8',9,sorh,NaN,thrSettings);
+            PPG.preproc = PPG.waveletBaseLineCorrectedSignal;
+           
+            % band stop filter
+            % Design a filter with a Q-factor of Q=35 to remove a 60 Hz tone from
+            % system running at 300 Hz.
+            Wo = 25/(500/2);
+            Bw = Wo/3;
+            [b,a] = iirnotch(Wo,Bw);
+            PPG.bandStopWaveletBaseLineCorrectedSignal=filter(b,a,PPG.waveletBaseLineCorrectedSignal);
+            % low pass filter
+            hFs=500/2;
+            Wp=50/hFs;
+            Ws=100/hFs;
+            [Lp_n,Lp_Wn] = buttord(Wp,Ws,0.1,8);
+            [b,a] = butter(Lp_n,Lp_Wn);
+            % freqz(b,a);
+            PPG.lowPassBandStopWaveletBaseLineCorrectedSignal=filter(b,a,PPG.bandStopWaveletBaseLineCorrectedSignal);
+            % smooth filter
+            PPG.smoothedLowPassBandStopWaveletBaseLineCorrectedSignal = smooth(PPG.lowPassBandStopWaveletBaseLineCorrectedSignal,5);
+            % Transposed
+            PPG.signal = PPG.smoothedLowPassBandStopWaveletBaseLineCorrectedSignal';
+            PPG.preproc = PPG.signal;
+%             figure (2);
+%         plot(PPG.signal,'b','linewidth',2);
+%         title('Ön İşlenmiş PPG Sinyali','fontsize',14); xlabel('Örnek','fontsize',14); ylabel('Genlik','fontsize',14)
+%            xlim([0 300])
+        end
+        %%
+        function [PPG] = SignalProcess(PPG)
+           
+            x1 = PPG.signal; fs = PPG.frequency;
+            N  = length(x1);        % Signal length
+            t  = (0:(N - 1)) / fs; % time index
+            % CANCELLATION DC DRIFT AND NORMALIZATION
+            x1 = x1 - mean(x1);         % cancel DC conponents
+            x1 = x1 / max(abs(x1));     % normalize to one
+            % LOW PASS FILTERING
+            % LPF (1-z^-6)^2 / (1-z^-1) ^ 2
+            b = [1 0 0 0 0 0 -2 0 0 0 0 0 1];
+            a = [1 -2 1];
+            h_LP = filter(b, a, [1 zeros(1, 12)]); % transfer function of LPF
+            x2 = conv (x1 ,h_LP);
+            x2 = x2 (6 + (1:N)); % cancle delay
+            x2 = x2 / max(abs(x2)); % normalize , for convenience .
+            % HIGH PASS FILTERING
+            % HPF = Allpass-(Lowpass) = z^-16-[(1-z^-32)/(1-z^-1)]
+            b = [-1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 32 -32 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1];
+            a = [1 -1];
+            h_HP=filter(b, a, [1 zeros(1, 32)]); % impulse response iof HPF
+            x3 = conv (x2, h_HP);
+            x3 = x3 (16 + (1:N)); %cancle delay
+            x3 = x3 / max(abs(x3));
+            % DERIVATIVE FILTER
+            % MECG impulse response
+            h  = [-1 -2 0 2 1]/8;
+            % Apply filter
+            x4 = conv (x3 ,h);
+            x4 = x4 (2+(1:N));
+            x4 = x4/ max( abs(x4 ));
+            % SQUARING
+            x5 = x4 .^2;
+            x5 = x5 / max(abs(x5));
+            % MOVING WINDOW INTEGRATION
+            % MECG impulse response
+            h  = ones(1, 31)/31;
+            % Delay = 15; % Delay in samples
+            % Apply filter
+            x6 = conv(x5, h);
+            x6 = x6 (15 + (1:N));
+            x6 = x6 / max(abs(x6));
+            % FIND QRS POINTS WHICH IT IS DIFFERENT THAN PAN-TOMPKINS ALGORITHM
+            maxHeight = max(x6);
+            thresh  = mean(x6);
+            poss_reg = (x6 > thresh * maxHeight)';
+            PPG.left        = find(diff([0 poss_reg']) == 1);
+            PPG.right       = find(diff([poss_reg' 0]) == -1);
+           
+            PPG.left = PPG.left; PPG.right = PPG.right; PPG.time = t;
+        end
+        %%
+       
+        function [PPG]=detectPeaks(PPG)
+            PPG.PLocation= zeros(1, length(PPG.left));
+            PPG.PValue= zeros(1, length(PPG.left));
+            PPG.Pfoot= zeros(1, length(PPG.left));
+            PPG.PfLocation= zeros(1, length(PPG.left));
+            PPG.Pdev= zeros(1, length(PPG.left));
+            PPG.PdLocation= zeros(1, length(PPG.left));
+            PPG.Pmin= zeros(1, length(PPG.left));
+            PPG.PminLocation= zeros(1, length(PPG.left));
+            for i=1:length(PPG.left)
+               
+                % PPG maksimum noktasını bulma
+               
+                window = PPG.signal(PPG.left(i):PPG.right(i));
+                [PPG.PValue(i), PPG.PLocation(i)] = max(window);
+                PPG.PLocation(i) = PPG.PLocation(i) + PPG.left(i) - 1;
+%                 PPG.PP(i) = length(window);
+               
+                % PPG Fooot bulma
+                window = PPG.signal(PPG.left(i):PPG.PLocation(i));
+                [PPG.Pfoot(i), PPG.PfLocation(i)] =  max(diff(window,2));
+                PPG.PfLocation(i) = PPG.PfLocation(i) + PPG.left(i) - 1;
+                %PPG 1.türev
+                window = PPG.signal(PPG.left(i):PPG.PLocation(i));
+                [PPG.Pdev(i), PPG.PdLocation(i)] = max(diff(window));
+                PPG.PdLocation(i) = PPG.PdLocation(i) + PPG.left(i) - 1;
+                % Pmin
+                window = PPG.signal(PPG.left(i):PPG.PLocation(i));
+                [PPG.Pmin(i), PPG.PminLocation(i)] = min(window);
+                PPG.PminLocation(i) = PPG.PminLocation(i) + PPG.left(i) - 1;          
+               
+            end
+            fs =PPG.frequency;
+            RR=diff(PPG.PLocation);
+            HR=60*fs./RR;
+            meanHR=mean(HR);
+            disp(strcat('PPG : Average Heart Rate : ', num2str(meanHR)));
+        end
+   
+        %%
+        function [PPG] = Normalization(PPG)
+            A=PPG.signal;
+            N = normalize(A,'zscore');
+            PPG.signal=N;
+            figure (2);
+            plot(PPG.signal,'b','linewidth',2);
+            title('Ön İşlenmiş PPG Sinyali','fontsize',14); xlabel('Örnek','fontsize',14); ylabel('Genlik','fontsize',14)
+            xlim([0 300])
+
+        end
+        %%
+       
+       function [PPG]=plotFragments(PPG)
+%          close(figure(4)); figure(4); hold on;
+            segmentLength = 131;
+            PPG.PPFragments = zeros(length(PPG.PLocation) - 2, segmentLength);
+            PPG.PPFragmentMean = zeros(1,segmentLength);
+            for i=2:length(PPG.PLocation) - 1
+                PPFragment = PPG.signal(PPG.PLocation(i) - 50 :PPG.PLocation(i) + 80);
+                PPFragment = PPFragment - mean(PPFragment);
+                %PQRSTFragment = PQRSTFragment / max(abs(PQRSTFragment)); % bad
+                PPG.PPFragments(i - 1, 1:segmentLength) = PPFragment;
+%            plot(PPFragment,'b');
+            end
+            for i=1:segmentLength
+                PPG.PPFragmentMean(i) = mean(PPG.PPFragments(:,i));
+            end
+            PPG.feature = diff(PPG.PPFragmentMean);
+            PPG.feature = PPG.PPFragmentMean;
+%            close(figure(5)); figure(5); hold on;
+%            plot(PPG.PPFragmentMean);
+         
+        end
+        %%
+        function [PPG]=plotPeaks(PPG)
+            figure;
+            subplot(2,1,1);
+            %  plot x1 or x1/(max(abs(x1))) not x1/max(abs(x1))
+            plot (PPG.time, PPG.signal, 'b', PPG.time(PPG.PLocation), PPG.PValue, 'k*',PPG.time(PPG.PfLocation), PPG.Pfoot, 'ko',PPG.time(PPG.PdLocation), PPG.Pdev, 'k+',PPG.time(PPG.PminLocation), PPG.Pmin, 'k^','linewidth',1.5);
+            title('PPG Signal');
+            xlabel('Time (s)'); ylabel('Amplitude');
+            legend('PPG', 'PPGpeak', 'PPGfoot(2.dev)', 'PPG (1.dev)','Pmin');
+            subplot(2,1,2,'Color','k')
+            plot (PPG.time, PPG.signal, 'b', PPG.time(PPG.PLocation), PPG.PValue, 'k*',PPG.time(PPG.PfLocation), PPG.Pfoot, 'ko',PPG.time(PPG.PdLocation), PPG.Pdev, 'k+',PPG.time(PPG.PminLocation), PPG.Pmin, 'k^','linewidth',1.5);
+            title('PPG Signal');
+            xlabel('Time (s)'); ylabel('Amplitude');
+            legend('PPG', 'PPGpeak', 'PPGfoot(2.dev)', 'PPG (1.dev)','PPGmin');
+            xlim([0 4])
+           
+           
+        end
+       
+    end
+end
